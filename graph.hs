@@ -1,116 +1,89 @@
 import Debug.Trace (trace)
+import qualified Data.ByteString as B
 import Data.Maybe
 import Data.List
 import Data.Ord
+import Data.Map.Strict (Map)
+import qualified Data.Map as Map
 import Control.Monad.State
-import Data.IntMap (IntMap)
 import System.Environment (getArgs)
+import Data.Word
+import Data.Bits
 
-type Grid = [[Maybe Int]]
+type Point = (Int,Int)
+type Value = Int
+type Frontier = Map Point Value
 
 main = do
   args <- getArgs
-  let n = read (head args) :: Int
-  let f x = sequence $ map addValue [1..x]
-  putStrLn $ evalState (do f n; prettyPrint) initGrid
+  mainArgs args
+
+mainArgs (file:[]) = do
+  contents <- B.readFile file
+  let bs = B.unpack contents
+  let t1 = foldM addValue [(0,0)] bs
+  putStrLn $ prettyPrint bs $ (0,0) : evalState t1 initFrontier
+  --print $ runState t1 initFrontier
+mainArgs _ = putStrLn "Invalid args"
   
-initGrid :: Grid
-initGrid = [[Just 0]]
+initFrontier :: Frontier
+initFrontier = Map.fromList $ zip initPoints $ repeat 0
 
-prettyPrint :: State Grid String
-prettyPrint = do
-  g <- get
-  let w = length (head g)
-  let h = length g
-  return $ concat $ "%!\n\n" : [prettyPrint' h w x y g | x <- [0..(h-1)], y <- [0..(w-1)]] ++ ["\nshowpage\n"]
-prettyPrint' h w x y g =
-  "newpath\n" ++
-  x1 ++ " " ++ y1 ++ " moveto\n" ++
-  x2 ++ " " ++ y1 ++ " lineto\n" ++
-  x2 ++ " " ++ y2 ++ " lineto\n" ++
-  x1 ++ " " ++ y2 ++ " lineto\n" ++
-  "closepath\n" ++
-  c ++ " setrgbcolor\nfill\n\n"
-    where
-      x1 = show $ min 573 $ (h - 1 - x) * 5 + 18
-      y1 = show $ min 816 $ y * 5 + 21
-      x2 = show $ min 573 $ (h - 1 - x) * 5 + 28
-      y2 = show $ min 816 $ y * 5 + 31
-      c  = if g!!x!!y == Nothing then "1.0 1.0 1.0" else "0.0 0.0 0.0"
+addValue :: [Point] -> Word8 -> State Frontier [Point]
+addValue ps b = do
+  xs <- get
+  let n = (length ps) - 1
+  let b' = fromIntegral b
+  let ls = Map.toList xs
+  let best = minimumBy (comparing snd) ls
+  let p@(x,y) = if odd b
+                  then head $ drop b' $ cycle [fst i | i <- ls, (snd i) == (snd best)]
+                  else head $ drop b' $ cycle $ reverse [fst i | i <- ls, (snd i) == (snd best)]
+  put $ Map.delete p xs
+  let newPoints' = filter (`notElem` ps) $ newPoints x y
+  --sequence $ map (\s -> modify $ Map.insertWith (+) s ((x^2+y^2)*(b'-92))) newPoints'
+  --sequence $ map (\s -> modify $ Map.insertWith (+) s ((b'-64))) newPoints'
+  sequence $ map (\s -> modify $ Map.insertWith (+) s ((b'-127)^2)) newPoints'
+  return (p:ps)
 
-expandGrid :: State Grid ()
-expandGrid = do
-  addTopRow
-  addBottomRow
-  addLeftColumn
-  addRightColumn
+initPoints :: [Point]
+initPoints = newPoints 0 0
+newPoints :: Int -> Int -> [Point]
+newPoints x y = filter (\(a,b) -> (abs (a*(round pp_scale))) < round pp_cX
+                  && (abs (b*(round pp_scale))) < round pp_cY)
+                  [(x-2,y+2),(x-1,y+2),(x+0,y+2),(x+1,y+2),(x+2,y+2),
+                   (x-2,y+1),(x-1,y+1),(x+0,y+1),(x+1,y+1),(x+2,y+1),
+                   (x-2,y+0),(x-1,y+0),          (x+1,y+0),(x+2,y+0),
+                   (x-2,y-1),(x-1,y-1),(x+0,y-1),(x+1,y-1),(x+2,y-1),
+                   (x-2,y-2),(x-1,y-2),(x+0,y-2),(x+1,y-2),(x+2,y-2)]
 
-addTopRow :: State Grid ()
-addTopRow = state $ \(g:gs) ->
-  ((), if catMaybes g == []
-        then g : gs
-        else (take (length g) nothings) : g : gs)
+prettyPrint :: [Word8] -> [Point] -> String
+prettyPrint bs ps =
+  let
+    s = show pp_scale
+    h = show pp_halfscale
+  in
+    "%!\n\n" ++
+    "/drawcircle { newpath\n" ++
+    "moveto\n" ++
+    h ++ " 0.0 rmoveto\n" ++
+    h ++ " 0.0 360.0 arc\n" ++
+    "closepath\n" ++
+    "0.5 0.5 sethsbcolor\nfill } def\n\n" ++
+    concatMap pp (zip (reverse ps) bs) ++ "\nshowpage\n"
 
-addBottomRow :: State Grid ()
-addBottomRow = state $ \gs ->
-  ((), if catMaybes (last gs) == []
-        then gs
-        else gs ++ [take (length (last gs)) nothings])
-
-addLeftColumn :: State Grid ()
-addLeftColumn = state $ \gs ->
-  ((), if catMaybes (head (transpose gs)) == []
-        then gs
-        else let gx = transpose gs
-                 h = length (head gx) in transpose $ (take h nothings) : gx)
-
-addRightColumn :: State Grid ()
-addRightColumn = state $ \gs ->
-  ((), if catMaybes (last (transpose gs)) == []
-        then gs
-        else let gx = transpose gs
-                 h = length (last gx) in transpose $ gx ++ [take h nothings])
-
-nothings = repeat Nothing
-
-calcValue :: Int -> Int -> State Grid Float
-calcValue x y = state $ \g -> (calcValue' x y g, g)
-
-calcValue' x y g
-  | x < 0 || y < 0 || x >= length g || y >= length (head g) = fromIntegral (maxBound :: Int)
-  | g!!x!!y /= Nothing = fromIntegral (maxBound :: Int)
-  | unUsed (x+1) y && unUsed (x-1) y && unUsed x (y+1) && unUsed x (y-1) = fromIntegral (maxBound :: Int)
-  | otherwise = sum ns' + (0.1 * (fromIntegral (length ns')))
-      where
-        unUsed x' y'
-          | x' < 0 || y' < 0 || x' >= length g || y' >= length (head g) = True
-          | otherwise = case g!!x'!!y' of Nothing  -> True
-                                          (Just n) -> False
-        neighborVal x' y'
-          | x' < 0 || y' < 0 || x' >= length g || y' >= length (head g) = 0
-          | otherwise = case g!!x'!!y' of Nothing  -> 0
-                                          (Just n) -> n
-        ns = [neighborVal (x+2) y, neighborVal (x-2) y, neighborVal x (y+2), neighborVal x (y-2),
-              neighborVal (x+1) (y+1), neighborVal (x-1) (y-1), neighborVal (x+1) (y-1), neighborVal (x-1)
-              (y+1)]
-        ns' = map fromIntegral $ filter (/=0) ns
-
-addValue :: Int -> State Grid ()
-addValue n = do
-  expandGrid
-  state $ \g -> ((), addValue' n g)
-
-addValue' :: Int -> Grid -> Grid
-addValue' n g = t ++ (l ++ (Just n) : (tail r)) : (tail b)
+pp ((x,y), v) = h ++ " " ++ x' ++ " " ++ y' ++ " " ++ x' ++ " " ++ y' ++ " drawcircle\n"
   where
-    w = length (head g)
-    h = length g
-    costList n
-      | n == 0 = [((x,y), calcValue' x y g) | x <- [0..(h-1)],       y <- [0..(w-1)]]
-      | n == 1 = [((x,y), calcValue' x y g) | x <- [(h-1),(h-2)..0], y <- [0..(w-1)]]
-      | n == 2 = [((x,y), calcValue' x y g) | x <- [0..(h-1)],       y <- [(w-1),(w-2)..0]]
-      | n == 3 = [((x,y), calcValue' x y g) | x <- [(h-1),(h-2)..0], y <- [(w-1),(w-2)..0]]
-    (x,y) = fst $ minimumBy (comparing snd) (costList (n `mod` 4))
-    (t,b) = splitAt x g
-    (l,r) = splitAt y $ head b
+    x' = show $ pp_cX + pp_scale * (fromIntegral x)
+    y' = show $ pp_cY + pp_scale * (fromIntegral y)
+    h  = show $ (fromIntegral v) / 255.0
+
+pp_scale :: Fractional a => a
+pp_scale = 3.0
+pp_halfscale :: Fractional a => a
+pp_halfscale = pp_scale / 2.0
+pp_cX :: Fractional a => a
+pp_cX = 612.0 / 2.0
+pp_cY :: Fractional a => a
+pp_cY = 792.0 / 2.0
 
